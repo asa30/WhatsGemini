@@ -7,11 +7,11 @@ import (
 	"os/signal"
 	"syscall"
 
+	_ "github.com/joho/godotenv/autoload"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mdp/qrterminal"
-	_ "github.com/joho/godotenv/autoload"
 
-	// "bytes"
+	"bytes"
 	// "encoding/json"
 	// "io"
 	// "net/http"
@@ -28,29 +28,30 @@ import (
 	"log"
 
 	"github.com/google/generative-ai-go/genai"
- 	"google.golang.org/api/option"
+	"google.golang.org/api/option"
 )
 
 type Prompt string
 
-type Prompt_with_Images struct {
-	Prompt Prompt
-	Images []byte
-}
-
-type Prompt_with_PDF struct {
-	Prompt Prompt
-	PDF []byte
+type OptionalPromptInputs struct {
+	Image    []byte
+	Video    []byte
+	Audio    []byte
+	FileData []byte
 }
 
 // Function to send POST request to the API
-func sendPostRequestGEMINI(prompt string) (string, error) {
+func promptGEMINI(prompt string, options *OptionalPromptInputs) (string, error) {
+	var promptInputData []byte
+	var resp *genai.GenerateContentResponse
+	var err error
+
 	// Get the API key and ModelID from environment variables
 	apiKey := os.Getenv("GEMINI_API_KEY")
 	if apiKey == "" {
 		return "", fmt.Errorf("GEMINI_API_KEY environment variable not set")
 	}
-	// 
+	//
 	model_id := os.Getenv("GEMINI_MODEL_ID")
 	if model_id == "" {
 		return "", fmt.Errorf("GEMINI_MODEL_ID environment variable not set")
@@ -64,40 +65,71 @@ func sendPostRequestGEMINI(prompt string) (string, error) {
 
 	model := client.GenerativeModel(model_id)
 
-	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
-	if err != nil {
-    	log.Fatal("Error generating content:", err)
+	prompt_type := "text"
+
+	// Checks if there are additional prompt inputs
+	if options != nil {
+		// If there was an Image attached, include it in the prompt to Gemini
+		if options.Image != nil {
+			promptInputData = options.Image
+			prompt_type = "image"
+		}
+		// If there was a Video attached, include it in the prompt to Gemini
+		if options.Video != nil {
+			promptInputData = options.Video
+			prompt_type = "video"
+		}
+		// If there was an Audio attached, include it in the prompt to Gemini
+		if options.Audio != nil {
+			promptInputData = options.Audio
+			prompt_type = "audio"
+		}
+		// If there was a File attached, include it in the prompt to Gemini
+		if options.FileData != nil {
+			promptInputData = options.FileData
+			prompt_type = "file"
+		}
 	}
 
-	fmt.Println("THE FUCKING PROMPT")
-	fmt.Println(prompt)
-	fmt.Println("THE FUCKING RESPONSE")
+	// Generate content
+	if prompt_type == "text" {
+		resp, err = model.GenerateContent(ctx, genai.Text(prompt))
+		if err != nil {
+			log.Fatal("Error generating content:", err)
+		}
+	} else {
+		// Upload the image to Gemini
+		opts := genai.UploadFileOptions{}
+		// 
+		upload, err := client.UploadFile(ctx, "", bytes.NewReader(promptInputData), &opts)
+		if err != nil {
+			log.Fatal("Error uploading prompt Image:", err)
+		}
+		// Construct the prompt
+		prompt := []genai.Part{
+			genai.FileData{URI: upload.URI},
+			genai.Text(prompt),
+		}
+		// Generate content
+		resp, err = model.GenerateContent(ctx, prompt...)
+		if err != nil {
+			log.Fatal("Error generating content:", err)
+		}
+	}
 
+	fmt.Println("THE PROMPT")
+	fmt.Println(prompt)
+	fmt.Println("THE RESPONSE")
 	fmt.Println(resp.Candidates[0].Content.Parts)
-	
+
 	outResponse := ""
 
 	for _, part := range resp.Candidates[0].Content.Parts {
-		// append text 
+		// append text
 		outResponse += fmt.Sprintf("%v\n", part)
 	}
 	return strings.TrimSpace(outResponse), err
 }
-
-// func htmlToWhatsAppFormat(html string) string {
-// 	// Replace HTML tags with WhatsApp-friendly formatting
-// 	html = strings.ReplaceAll(html, "</p>\n", "\n")
-// 	html = strings.ReplaceAll(html, "</p>", "\n")
-// 	html = strings.ReplaceAll(html, "<p>", "")
-// 	html = strings.ReplaceAll(html, "<ol>", "- ")
-// 	html = strings.ReplaceAll(html, "</ol>", "\n")
-// 	html = strings.ReplaceAll(html, "<li>", "- ")
-// 	html = strings.ReplaceAll(html, "</li>", "\n")
-// 	html = strings.ReplaceAll(html, "<br>", "\n")
-
-// 	return html
-// }
-
 
 func GetEventHandler(client *whatsmeow.Client) func(interface{}) {
 	// declare the trigger
@@ -108,7 +140,7 @@ func GetEventHandler(client *whatsmeow.Client) func(interface{}) {
 	}
 	return func(evt interface{}) {
 		switch v := evt.(type) {
-		case *events.Message:
+		case *events.Message:			
 			var messageBody = v.Message.GetConversation()
 			if messageBody == trigger || strings.Contains(messageBody, trigger) {
 				var chatMsg = strings.ReplaceAll(messageBody, trigger, "")
@@ -117,7 +149,106 @@ func GetEventHandler(client *whatsmeow.Client) func(interface{}) {
 				fmt.Println("The user name is:", userDetail)
 				message := chatMsg
 
-				respMessage, err := sendPostRequestGEMINI(message)
+				respMessage, err := promptGEMINI(message, nil)
+				if err != nil {
+					fmt.Println("Failed to send post request:", err)
+				}
+
+				client.SendMessage(context.Background(), v.Info.Chat, &waProto.Message{
+					Conversation: proto.String(respMessage),
+				})
+			}
+			// 
+			var messageImage = v.Message.GetImageMessage()
+			var caption = messageImage.GetCaption()
+			if caption == trigger || strings.Contains(caption, trigger) {
+				var chatMsg = strings.ReplaceAll(caption, trigger, "")
+				userDetail := v.Info.Sender.User
+
+				fmt.Println("The user name is:", userDetail)
+				message := chatMsg
+
+				var ImageData []byte = nil
+				var err error
+				if messageImage != nil {
+					fmt.Println("Image attached")
+					ImageData, err = client.Download(messageImage)
+					if err != nil {
+						fmt.Println("Failed to download image:", err)
+					}
+				}
+
+				attachments := OptionalPromptInputs{
+					Image: ImageData,
+				}
+
+				respMessage, err := promptGEMINI(message, &attachments)
+				if err != nil {
+					fmt.Println("Failed to send post request:", err)
+				}
+
+				client.SendMessage(context.Background(), v.Info.Chat, &waProto.Message{
+					Conversation: proto.String(respMessage),
+				})
+			}
+			// 
+			var messageVideo = v.Message.GetVideoMessage()
+			caption = messageVideo.GetCaption()
+			if caption == trigger || strings.Contains(caption, trigger) {
+				var chatMsg = strings.ReplaceAll(caption, trigger, "")
+				userDetail := v.Info.Sender.User
+
+				fmt.Println("The user name is:", userDetail)
+				message := chatMsg
+
+				var VideoData []byte = nil
+				var err error
+				if messageVideo != nil {
+					fmt.Println("Video attached")
+					VideoData, err = client.Download(messageVideo)
+					if err != nil {
+						fmt.Println("Failed to download video:", err)
+					}
+				}
+
+				attachments := OptionalPromptInputs{
+					Video: VideoData,
+				}
+
+				respMessage, err := promptGEMINI(message, &attachments)
+				if err != nil {
+					fmt.Println("Failed to send post request:", err)
+				}
+
+				client.SendMessage(context.Background(), v.Info.Chat, &waProto.Message{
+					Conversation: proto.String(respMessage),
+				})
+			}
+			// 
+			var messageDocument = v.Message.GetDocumentMessage()
+			caption = messageDocument.GetCaption()
+			if caption == trigger || strings.Contains(caption, trigger) {
+				var chatMsg = strings.ReplaceAll(caption, trigger, "")
+				userDetail := v.Info.Sender.User
+
+				fmt.Println("The user name is:", userDetail)
+				message := chatMsg
+
+				var FileData []byte = nil
+				var err error
+				if messageDocument != nil {
+					fmt.Println("File attached")
+					FileData, err = client.Download(messageDocument)
+					if err != nil {
+						fmt.Println("Failed to download file:", err)
+					}
+				}
+
+				attachments := OptionalPromptInputs{
+					FileData: FileData,
+				}
+
+				respMessage, err := promptGEMINI(message, &attachments)
 				if err != nil {
 					fmt.Println("Failed to send post request:", err)
 				}
