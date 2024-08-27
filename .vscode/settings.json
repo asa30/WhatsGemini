@@ -22,4 +22,11 @@
     "accessibility.signals.format": {
         "sound": "userGesture"
     },
+    "[go]": {
+        "editor.insertSpaces": true,
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "golang.go"
+    },
+    "go.formatTool": "goimports",
+    "go.inlayHints.parameterNames": true,
 }
