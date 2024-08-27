@@ -10,7 +10,8 @@
                 "eamodio.gitlens",
                 "GitHub.copilot",
                 "usernamehw.errorlens",
-                "aaron-bond.better-comments"
+                "aaron-bond.better-comments",
+                "vscode-icons-team.vscode-icons"
             ]
         }
     },
